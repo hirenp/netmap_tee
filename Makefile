@@ -8,8 +8,8 @@ PROGS	=	pkt-gen bridge vale-ctl testpcap tee libnetmap.so
 CLEANFILES = $(PROGS) pcap.o nm_util.o
 NO_MAN=
 CFLAGS += -Werror -Wall -nostdinc -I/usr/include -I../../../sys
-#CFLAGS += -Wextra
-CFLAGS += -Wextra -DNO_SWAP
+CFLAGS += -Wextra
+#CFLAGS += -Wextra -DNO_SWAP
 #CFLAGS += -Wextra -g
 
 LDFLAGS += -lpthread

@@ -28,7 +28,8 @@ sigint_h(int sig)
 
 
 /*
- * move up to 'limit' pkts from rxring to txring swapping buffers.
+ * Move up to 'limit' pkts from rxring of src to txring of dest
+ * swapping buffers.
  */
 static int
 process_rings(struct netmap_ring *rxring, struct netmap_ring *txring,
@@ -52,12 +53,8 @@ process_rings(struct netmap_ring *rxring, struct netmap_ring *txring,
 	while (limit-- > 0) {
 		struct netmap_slot *rs = &rxring->slot[j];
 		struct netmap_slot *ts = &txring->slot[k];
-#ifdef NO_SWAP
 		char *rxbuf = NETMAP_BUF(rxring, rs->buf_idx);
 		char *txbuf = NETMAP_BUF(txring, ts->buf_idx);
-#else
-		uint32_t pkt;
-#endif
 
 		/* swap packets */
 		if (ts->buf_idx < 2 || rs->buf_idx < 2) {
@@ -65,24 +62,15 @@ process_rings(struct netmap_ring *rxring, struct netmap_ring *txring,
 				j, rs->buf_idx, k, ts->buf_idx);
 			sleep(2);
 		}
-#ifndef NO_SWAP
-		pkt = ts->buf_idx;
-		ts->buf_idx = rs->buf_idx;
-		rs->buf_idx = pkt;
-#endif
+
 		/* copy the packet length. */
 		if (rs->len < 14 || rs->len > 2048)
 			D("wrong len %d rx[%d] -> tx[%d]", rs->len, j, k);
 		else if (verbose > 1)
 			D("%s send len %d rx[%d] -> tx[%d]", msg, rs->len, j, k);
 		ts->len = rs->len;
-#ifdef NO_SWAP
+
 		pkt_copy(rxbuf, txbuf, ts->len);
-#else
-		/* report the buffer change. */
-		ts->flags |= NS_BUF_CHANGED;
-		rs->flags |= NS_BUF_CHANGED;
-#endif /* NO_SWAP */
 		j = nm_ring_next(rxring, j);
 		k = nm_ring_next(txring, k);
 	}
@@ -104,7 +92,6 @@ move(struct nm_desc_t *src, struct nm_desc_t *dst, u_int limit)
 		"host->net" : "net->host";
 
 	while (si <= src->last_rx_ring && di <= dst->last_tx_ring) {
-		//rxring = src->tx + si; orig
 		rxring = src->rx + si;
 		txring = dst->tx + di;
 		ND("txring %p rxring %p", txring, rxring);
@@ -133,11 +120,8 @@ usage(void)
 }
 
 /*
- * tee [-v] ifs ifd1
- *
- * If only one name, or the two interfaces are the same,
- * bridges userland and the adapter. Otherwise bridge
- * two intefaces.
+ * tee [-v] -s netmap:ifs -d netmap:ifd
+ * sudo ./tee -s netmap:ix0 -d netmap:ix1
  */
 int
 main(int argc, char **argv)
@@ -153,11 +137,11 @@ main(int argc, char **argv)
 
 	while ( (ch = getopt(argc, argv, "s:d:vb")) != -1) {
 		switch (ch) {
-		case 'b':	/* source interface */
+		case 'b':	/* burst size */
 			burst = atoi(optarg);
 			D("burst= %s", optarg);
 			break;
-		case 's':	/* source interface */
+		case 's':	/* src interface */
 			ifs = optarg;
 			D("ifs= %s", optarg);
 			break;
@@ -199,19 +183,13 @@ main(int argc, char **argv)
 	pollfd[0].fd = ps->fd;
 	pollfd[1].fd = pd->fd;
 
-	/*
-	D("Wait %d secs for link to come up...", wait_link);
-	sleep(wait_link);
-	*/
-	D("Ready to go, %s 0x%x/%d <-> %s 0x%x/%d.",
+	D("Ready to go, %s 0x%x/%d -> %s 0x%x/%d.",
 		ps->req.nr_name, ps->first_rx_ring, ps->req.nr_rx_rings,
-		//pd->req.nr_name, pd->first_rx_ring, pd->req.nr_rx_rings); orig
 		pd->req.nr_name, pd->first_tx_ring, pd->req.nr_tx_rings);
 
 	/* main loop */
 	signal(SIGINT, sigint_h);
 	while (!do_abort) {
-		//printf("%s:%d Inside main loop\n", __func__, __LINE__);
 		int ret;
 
 		pollfd[0].events = 0;
@@ -226,7 +204,7 @@ main(int argc, char **argv)
 		/* write to 1 */
 		pollfd[1].events |= POLLOUT;
 
-#if 0
+#if 0 // XXX: Do I really NEED this?
 		int n0, n1;
 		/* check rx queue of src */
 		n0 = pkt_queued(ps, 0);
@@ -250,20 +228,6 @@ main(int argc, char **argv)
 			pollfd[1].events |= POLLOUT;
 #endif
 
-		/*
-		n0 = pkt_queued(pa, 0);
-		n1 = pkt_queued(pb, 0);
-
-		if (n0)
-			pollfd[1].events |= POLLOUT;
-		else
-			pollfd[0].events |= POLLIN;
-		if (n1)
-			pollfd[0].events |= POLLOUT;
-		else
-			pollfd[1].events |= POLLIN;
-		*/
-
 		ret = poll(pollfd, 2, 0);
 #if 0
 		if (ret <= 0 || verbose)
@@ -283,7 +247,6 @@ main(int argc, char **argv)
 			);
 #endif
 		if (ret < 0) {
-			printf("%s:%d - still no data\n", __func__, __LINE__);
 			continue;
 		}
 		if (pollfd[0].revents & POLLERR) {
@@ -295,22 +258,18 @@ main(int argc, char **argv)
 				pd->tx->cur, pd->tx->tail);
 		}
 
+		/*
+		 * if src has data to read and
+		 * we can write on dst, do it.
+		 */
 		if ((pollfd[0].revents & POLLIN) &&
 		    (pollfd[1].revents & POLLOUT)) {
-			//printf("%s:%d - Let's move()\n", __func__, __LINE__);
 			move(ps, pd, burst);
 			// XXX we don't need the ioctl */
 			// ioctl(me[0].fd, NIOCTXSYNC, NULL);
 		}
-#if 0
-		if (pollfd[1].revents & POLLOUT) {
-			//printf("%s:%d - WRITE is ready\n", __func__, __LINE__);
-			move(ps, pd, burst);
-			// XXX we don't need the ioctl */
-			// ioctl(me[1].fd, NIOCTXSYNC, NULL);
-		}
-#endif
 	}
+
 	D("exiting");
 	nm_close(ps);
 	nm_close(pd);
